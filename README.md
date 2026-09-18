@@ -121,14 +121,21 @@ Designed for strict data privacy and zero API costs, SentinelFlow runs entirely 
 *(Fill in any specific input format requirements, supported log types, or screenshots of the dashboard here.)*
 
 ---
+## 🎬 Live Demonstrations
 
-## 🎥 Demo Video
-```markdown
+### Autonomous End-to-End Resolution (Safe Path)
+<!-- Paste the GitHub video URL here, or use the GIF syntax below if it's a GIF -->
 ![SentinelFlow Demo](./docs/demo.gif)
-```
 
-Record the console in action (e.g. with ScreenToGif or OBS + a GIF converter), save it to a `docs/` folder in your repo, and reference it here for a preview that plays directly in the README without needing a click.
+---
 
+### Human-in-the-Loop (HITL) Safety Guardrail (Mutating Path)
+
+When an incident remediation suggests mutating system state (e.g., terminating processes, restarting daemons), SentinelFlow arrests automatic execution and requires explicit human verification:
+
+| 1. Risk Flag & Prompt | 2. Operator Authorization | 3. Host Remediation Execution |
+| :---: | :---: | :---: |
+| ![Prompt](./docs/hitl_prompt.png) | ![Authorization](./docs/hitl_approved.png) | ![Execution](./docs/terminal_execution.png) |
 </details>
 
 ---
