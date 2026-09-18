@@ -1,63 +1,79 @@
 import subprocess
-from typing import TypedDict, Optional, Literal
+from typing import TypedDict, Optional, Literal, List
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 from langgraph.graph import StateGraph, START, END
+from rag import HybridRAG
 
 # 1. State Definition
 class AgentState(TypedDict):
     error_message: str
     is_complex: bool
     reasoning_mode: str
+    retrieved_runbook: str
     diagnosis_plan: str
     suggested_command: str
     is_risky: bool
     command_output: Optional[str]
 
-# 2. Centralized Local Client (Runs exclusively on your RX 7800 XT)
+# 2. Centralized Local Model Client (AMD RX 7800 XT via LM Studio)
 local_llm = ChatOpenAI(
     base_url="http://localhost:1234/v1",
     api_key="not-needed",
     model="default",
     temperature=0.1,
-    extra_body={"model": ""}  # Tells LM Studio to route to whatever model is currently loaded
+    extra_body={"model": ""}
 )
 
-# 3. Router Node
+# Initialize RAG Engine
+rag_engine = HybridRAG()
+
+# 3. Router & Triage Nodes
 def evaluate_complexity(state: AgentState) -> dict:
-    """Evaluates whether an error requires fast triage or deep architectural reasoning."""
     err = state["error_message"].lower()
     complex_signals = ["deadlock", "distributed", "corrupt", "kernel", "out of memory", "panic"]
     is_complex = any(sig in err for sig in complex_signals) or len(err.split()) > 30
     return {"is_complex": is_complex}
 
+def retrieve_knowledge(state: AgentState) -> dict:
+    """Node: Retrieves and reranks matching incident runbooks."""
+    print("\n[Node: retrieve_knowledge] Running Hybrid Search & Cross-Encoder...")
+    matched = rag_engine.retrieve_and_rerank(state["error_message"], top_k=1)
+    if matched:
+        runbook = f"Runbook: {matched[0]['title']}\nInstructions: {matched[0]['content']}"
+        print(f" -> Found: {matched[0]['title']}")
+    else:
+        runbook = "No specific runbook found. Proceed with standard diagnostics."
+    return {"retrieved_runbook": runbook}
+
 def route_decision(state: AgentState) -> Literal["fast_triage", "deep_reasoning"]:
     if state["is_complex"]:
-        print("\n🔀 Route: High complexity issue -> Activating Deep Reasoning Mode")
+        print("🔀 Route: High complexity issue -> Activating Deep Reasoning Mode")
         return "deep_reasoning"
-    print("\n🔀 Route: Standard issue -> Activating Fast Triage Mode")
+    print("🔀 Route: Routine issue -> Activating Fast Triage Mode")
     return "fast_triage"
 
-# 4. Diagnostic Nodes (Locally Served)
+# 4. Diagnostic Nodes (Grounded in Retrieved Runbook)
 def fast_triage(state: AgentState) -> dict:
-    """Standard, concise diagnosis for routine bugs."""
-    print("[Node: fast_triage] Executing standard analysis on local GPU...")
+    print("[Node: fast_triage] Formulating quick diagnosis with runbook guidance...")
     prompt = [
         SystemMessage(content=(
-            "You are SentinelFlow in FAST-TRIAGE mode. "
-            "Provide a 2-sentence cause analysis and exactly ONE single-line Windows PowerShell command to inspect it."
+            "You are SentinelFlow in FAST-TRIAGE mode. Use the provided runbook context to solve the error.\n"
+            f"{state['retrieved_runbook']}\n"
+            "Provide a 2-sentence cause analysis and ONE single-line Windows PowerShell command to inspect or resolve it."
         )),
         HumanMessage(content=f"Error: {state['error_message']}")
     ]
     res = local_llm.invoke(prompt)
-    return {"diagnosis_plan": res.content, "reasoning_mode": "Fast Triage (Local)"}
+    return {"diagnosis_plan": res.content, "reasoning_mode": "Fast Triage (Local RAG)"}
 
 def deep_reasoning(state: AgentState) -> dict:
-    """Chain-of-thought, in-depth root-cause analysis for complex failures."""
-    print("[Node: deep_reasoning] Executing multi-step root-cause analysis on local GPU...")
+    print("[Node: deep_reasoning] Formulating chain-of-thought analysis with runbook guidance...")
     prompt = [
         SystemMessage(content=(
-            "You are SentinelFlow in DEEP REASONING mode. Analyze the failure systematically:\n"
+            "You are SentinelFlow in DEEP REASONING mode. Use the provided runbook context to solve the error.\n"
+            f"{state['retrieved_runbook']}\n"
+            "Analyze systematically:\n"
             "1. Concurrency / State Invalidation Analysis\n"
             "2. Root Cause Hypothesis\n"
             "3. Single-line Windows PowerShell command to inspect or resolve the system state."
@@ -65,33 +81,31 @@ def deep_reasoning(state: AgentState) -> dict:
         HumanMessage(content=f"Complex Failure: {state['error_message']}")
     ]
     res = local_llm.invoke(prompt)
-    return {"diagnosis_plan": res.content, "reasoning_mode": "Deep Chain-of-Thought (Local)"}
+    return {"diagnosis_plan": res.content, "reasoning_mode": "Deep Chain-of-Thought (Local RAG)"}
 
 # 5. Extraction & Execution Node (With HITL Guardrail)
 def extract_and_execute(state: AgentState) -> dict:
     extract_prompt = [
         SystemMessage(content=(
             "Extract ONE executable Windows PowerShell command from this text. "
-            "IMPORTANT: Do not use placeholders like '<PID>' or '<process_name>'. "
-            "If an exact ID is unknown, write a generic inspection command like: "
+            "Do not use placeholders like '<PID>' or '<process_name>'. "
+            "If an exact ID is unknown, output a generic inspection command like: "
             "'Get-Process | Sort-Object CPU -Descending | Select-Object -First 5'. "
-            "Return ONLY the raw one-line command without markdown codeblocks or tags:"
+            "Return ONLY the raw one-line command without markdown or tags:"
         )),
         HumanMessage(content=state["diagnosis_plan"])
     ]
     raw_cmd = local_llm.invoke(extract_prompt).content.strip().replace("`", "")
     
-    # Strip leading shell names if present
     lines = [line.strip() for line in raw_cmd.splitlines() if line.strip()]
     command = lines[-1] if lines else "Get-Process | Select-Object -First 5"
     if command.lower().startswith("powershell"):
         command = command[10:].strip()
 
-    # If the model still generated a placeholder bracket, swap to safe fallback
     if "<" in command or ">" in command:
         command = "Get-Process | Sort-Object CPU -Descending | Select-Object -First 5"
 
-    risky_keywords = ["restart", "stop", "kill", "remove", "delete", "rm", "net stop", "sc stop"]
+    risky_keywords = ["restart", "stop", "kill", "remove", "delete", "rm", "net stop", "sc stop", "start-service"]
     is_risky = any(kw in command.lower() for kw in risky_keywords)
 
     print(f"\n[Reasoning Profile]: {state['reasoning_mode']}")
@@ -112,27 +126,27 @@ def extract_and_execute(state: AgentState) -> dict:
     except Exception as e:
         print(f"\n[Execution Failed]: {str(e)}")
         return {"suggested_command": command, "is_risky": is_risky, "command_output": str(e)}
-# 6. Build the Graph
+
+# 6. Build the Connected Graph
 builder = StateGraph(AgentState)
 
 builder.add_node("evaluate", evaluate_complexity)
+builder.add_node("retrieve", retrieve_knowledge)
 builder.add_node("fast_triage", fast_triage)
 builder.add_node("deep_reasoning", deep_reasoning)
 builder.add_node("execute", extract_and_execute)
 
 builder.add_edge(START, "evaluate")
-builder.add_conditional_edges("evaluate", route_decision)
+builder.add_edge("evaluate", "retrieve")
+builder.add_conditional_edges("retrieve", route_decision)
 builder.add_edge("fast_triage", "execute")
 builder.add_edge("deep_reasoning", "execute")
 builder.add_edge("execute", END)
 
 agent = builder.compile()
 
-# 7. Test Run with a Complex Deadlock Error
+# 7. Test Run (Routine MySQL error to test RAG grounding)
 if __name__ == "__main__":
-    complex_test = (
-        "Fatal deadlock encountered in transaction worker 0x8F: "
-        "kernel lock wait timeout exceeded during distributed table synchronization."
-    )
-    print(f"Input Error:\n{complex_test}")
-    agent.invoke({"error_message": complex_test})
+    test_incident = "OperationalError 10061: Target machine actively refused connection on port 3306."
+    print(f"Submitting Incident:\n{test_incident}")
+    agent.invoke({"error_message": test_incident})
