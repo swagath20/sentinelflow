@@ -1,0 +1,4 @@
+INFO 10:00:01 Bootstrapping cluster node-1
+INFO 10:00:02 Syncing distributed storage metadata
+CRITICAL 10:00:05 Kernel lock wait timeout exceeded during distributed table synchronization
+FATAL 10:00:06 Transaction worker 0x8F deadlock state encountered
